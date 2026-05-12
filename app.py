@@ -668,26 +668,37 @@ SEVERITY_BADGE = {
 }
 
 
-def embed_screenshots(text: str, image_map_by_index, attachments_prefix: str) -> str:
+def embed_screenshots(text: str, image_map_by_index, attachments_prefix: str,
+                       fallback_urls=None) -> str:
     """Replace [Screenshot N] tokens with Obsidian embeds.
 
-    Uses bare-filename wiki-links (`![[file.webp]]`) instead of a full path
-    so Obsidian resolves them regardless of the user's "New link format"
-    setting (Shortest / Relative / Absolute). Filenames are unique per
-    writeup because they already include the slug prefix.
+    Resolution order for each [Screenshot N]:
+      1. If the image was downloaded successfully → bare-filename Obsidian
+         embed `![[file.webp]]` (Obsidian finds it regardless of the user's
+         "New link format" setting).
+      2. If the download failed but we know the source URL → fall back to
+         a standard markdown embed `![](https://...)`. Obsidian renders
+         remote images inline, so the note stays useful even if the CDN
+         blocked our fetch or the user's vault root is misconfigured.
+      3. Otherwise leave [Screenshot N] alone.
     """
+    fallback_urls = fallback_urls or {}
 
     def repl(m):
         idx = int(m.group(1))
         fname = image_map_by_index.get(idx)
         if fname:
             return f"\n\n![[{fname}]]\n\n"
+        url = fallback_urls.get(idx)
+        if url:
+            return f"\n\n![]({url})\n\n"
         return m.group(0)
 
     return re.sub(r"\[Screenshot\s+(\d+)\]", repl, text)
 
 
-def build_obsidian_md(data: dict, source_url: str, image_map_by_index, attachments_prefix: str) -> str:
+def build_obsidian_md(data: dict, source_url: str, image_map_by_index,
+                       attachments_prefix: str, fallback_urls=None) -> str:
     today = datetime.now().strftime("%Y-%m-%d")
     title = data.get("title", "Untitled Writeup")
     severity = data.get("severity", "Unknown")
@@ -743,14 +754,14 @@ def build_obsidian_md(data: dict, source_url: str, image_map_by_index, attachmen
     if core:
         lines.append("## 💡 الفكرة الأساسية")
         lines.append("")
-        lines.append(embed_screenshots(core, image_map_by_index, attachments_prefix))
+        lines.append(embed_screenshots(core, image_map_by_index, attachments_prefix, fallback_urls))
         lines.append("")
 
     scenario = (data.get("attack_scenario") or "").strip()
     if scenario:
         lines.append("## 🎯 سيناريو الهجوم")
         lines.append("")
-        lines.append(embed_screenshots(scenario, image_map_by_index, attachments_prefix))
+        lines.append(embed_screenshots(scenario, image_map_by_index, attachments_prefix, fallback_urls))
         lines.append("")
 
     steps = data.get("attack_steps_concise") or []
@@ -782,7 +793,7 @@ def build_obsidian_md(data: dict, source_url: str, image_map_by_index, attachmen
     if rc:
         lines.append("## 🔍 السبب الجذري")
         lines.append("")
-        lines.append(embed_screenshots(rc, image_map_by_index, attachments_prefix))
+        lines.append(embed_screenshots(rc, image_map_by_index, attachments_prefix, fallback_urls))
         lines.append("")
 
     rem = (data.get("remediation") or "").strip()
@@ -809,12 +820,18 @@ def build_obsidian_md(data: dict, source_url: str, image_map_by_index, attachmen
             lines.append(f"- [[{slug}]]")
         lines.append("")
 
-    if image_map_by_index:
+    fallback_urls = fallback_urls or {}
+    all_indices = sorted(set(image_map_by_index.keys()) | set(fallback_urls.keys()))
+    if all_indices:
         lines.append("## 📸 كل اللقطات")
         lines.append("")
-        for idx in sorted(image_map_by_index.keys()):
+        for idx in all_indices:
             lines.append(f"**Screenshot {idx}**")
-            lines.append(f"![[{image_map_by_index[idx]}]]")
+            fname = image_map_by_index.get(idx)
+            if fname:
+                lines.append(f"![[{fname}]]")
+            elif fallback_urls.get(idx):
+                lines.append(f"![]({fallback_urls[idx]})")
             lines.append("")
 
     lines.append("## 🌐 المصدر")
@@ -910,10 +927,20 @@ def analyze():
         image_map = download_images(image_urls, slug_attachments_dir, slug) if image_urls else {}
 
         index_to_fname = {url_to_index[u]: fname for u, fname in image_map.items()}
+        # Every image we *tried* to download gets a source-URL fallback, so the
+        # note still renders even when the file isn't on disk (CDN blocked us,
+        # Obsidian is pointing at a different vault, etc.).
+        index_to_url = {idx: u for u, idx in url_to_index.items()}
         attachments_prefix = f"{cfg['attachments_subdir']}/{slug}"
 
+        failed_count = len(image_urls) - len(image_map)
+        if failed_count:
+            print(f"      ⚠ {failed_count}/{len(image_urls)} images failed to download — "
+                  f"the note will reference their source URLs instead.")
+
         print(f"[5/5] 📝 Building Obsidian markdown...")
-        md_content = build_obsidian_md(data, url, index_to_fname, attachments_prefix)
+        md_content = build_obsidian_md(data, url, index_to_fname, attachments_prefix,
+                                        fallback_urls=index_to_url)
 
         # Portable version: rewrite Obsidian ![[attachments/.../file]] embeds
         # to base64 data: URIs so a single .md file renders everywhere
