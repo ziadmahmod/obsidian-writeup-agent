@@ -602,6 +602,16 @@ def call_llm(prompt: str, cfg: dict) -> str:
     model = (cfg.get("model") or PROVIDER_DEFAULT_MODEL.get(provider, "")).strip()
     api_key = (cfg.get("api_key") or "").strip()
 
+    # Defensive: if a user pasted a dropdown label by mistake (e.g.
+    # "gemini-2.5-flash — سريع، quota سخي (Recommended)"), the upstream
+    # provider rejects it as "unexpected model name format". Real model
+    # IDs never contain whitespace, so take the first token.
+    if model:
+        first_token = model.split()[0]
+        if first_token != model:
+            print(f"      ⚠ trimming model '{model}' → '{first_token}'")
+            model = first_token
+
     if provider in LOCAL_CLI_BINARIES:
         binary, friendly = LOCAL_CLI_BINARIES[provider]
         return call_local_cli(prompt, binary, friendly, model)
