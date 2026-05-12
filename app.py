@@ -77,9 +77,22 @@ PROVIDER_DEFAULT_MODEL = {
 
 UA = {
     "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
-    )
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    ),
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "image/avif,image/webp,image/apng,*/*;q=0.8"
+    ),
+    "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
 }
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
@@ -120,10 +133,36 @@ def slugify(text: str, max_len: int = 60) -> str:
 
 
 def fetch_html(url: str) -> str:
-    resp = requests.get(url, headers=UA, timeout=30, allow_redirects=True)
-    resp.raise_for_status()
-    resp.encoding = resp.apparent_encoding or "utf-8"
-    return resp.text
+    """Fetch the page HTML. Falls back to r.jina.ai (a public fetch proxy
+    that handles bot detection on its end) when the direct request is
+    blocked — common for Medium, Cloudflare-fronted blogs, and when the
+    client IP is on a residential / VPN / Kali range."""
+    try:
+        resp = requests.get(url, headers=UA, timeout=30, allow_redirects=True)
+        resp.raise_for_status()
+        resp.encoding = resp.apparent_encoding or "utf-8"
+        return resp.text
+    except requests.HTTPError as e:
+        status = e.response.status_code if e.response is not None else 0
+        if status in (401, 403, 429, 451, 503):
+            # Fetch through r.jina.ai. It returns the page rendered as
+            # markdown; we wrap it in a minimal HTML envelope so the
+            # downstream trafilatura/extract pipeline can still work
+            # (it'll mostly pass-through, which is fine).
+            print(f"      Direct fetch returned {status}; falling back to r.jina.ai...")
+            r = requests.get(
+                f"https://r.jina.ai/{url}",
+                headers={"Accept": "text/html", "User-Agent": UA["User-Agent"]},
+                timeout=60,
+            )
+            r.raise_for_status()
+            r.encoding = r.apparent_encoding or "utf-8"
+            body = r.text
+            if "<html" not in body.lower():
+                # jina returned plain markdown — wrap so the extractor accepts it
+                body = f"<html><body><article>{body}</article></body></html>"
+            return body
+        raise
 
 
 def _pick_largest_from_srcset(srcset: str) -> str:
@@ -418,7 +457,34 @@ def call_local_cli(prompt: str, binary: str, friendly_name: str, model: str = ""
         if result.returncode != 0:
             err = (result.stderr or result.stdout or "").strip()[:800]
             raise RuntimeError(f"{friendly_name} رجع error (code {result.returncode}):\n{err}")
-        return result.stdout.strip()
+
+        # opencode prints ANSI escape codes and a "> build · <model>" header,
+        # AND exits 0 even when the provider denies the request — with the
+        # actual error on stderr. So we must check both streams and only
+        # report success if stdout has the model's response.
+        def _strip_ansi(s):
+            return re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", s or "")
+
+        out = _strip_ansi(result.stdout)
+        err = _strip_ansi(result.stderr)
+        # Any "Error: ..." line anywhere is a real failure.
+        for stream_name, stream in (("stderr", err), ("stdout", out)):
+            for line in stream.splitlines():
+                line = line.strip()
+                if line.startswith("Error:"):
+                    raise RuntimeError(
+                        f"{friendly_name} رجع error من الـ provider:\n{line}\n\n"
+                        f"جرّب `opencode auth login` واختار provider عندك credentials ليه "
+                        f"(Anthropic / OpenAI / إلخ)."
+                    )
+        # Drop the leading banner line "> build · <model>" if present.
+        cleaned = re.sub(r"^\s*>\s+build\s+·.*\n", "", out, count=1).strip()
+        if not cleaned:
+            # stdout was empty but no explicit Error line — surface stderr.
+            raise RuntimeError(
+                f"{friendly_name} ما رجعش output.\nstderr:\n{err[:600]}"
+            )
+        return cleaned
 
     cmd = [_cli_bin(binary), "-p"]
     if binary in ("gemini", "qwen"):
