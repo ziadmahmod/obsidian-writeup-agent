@@ -176,9 +176,18 @@ You can edit it by hand if you prefer.
 
 ## 🔧 Troubleshooting
 
-### "Provider unavailable" in the UI
+### "Provider unavailable" / "CLI not in PATH"
 - For a CLI provider, make sure the binary is on `PATH`. Try `claude --version` / `gemini --version` / `qwen --version` in a terminal.
-- On Windows, npm-installed CLIs land in `%APPDATA%\npm`. If `where claude` fails, add that folder to `PATH`.
+- **On Windows:** npm-installed CLIs land in `%APPDATA%\npm`. If `where claude` fails, add that folder to `PATH`.
+- **On macOS / Linux (zsh):** if the CLI is installed via `npm i -g` or a user-local installer, it usually goes into `~/.local/bin`, which zsh doesn't see by default. Add it to your shell profile:
+  ```bash
+  echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
+  ```
+- **On Linux (bash):** same idea, different file:
+  ```bash
+  echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
+  ```
+- After fixing `PATH`, restart the writeup-agent server so the new env is picked up.
 
 ### Page fetch fails
 - Some sites (private HackerOne, paywalled Medium) need auth — those won't work.
