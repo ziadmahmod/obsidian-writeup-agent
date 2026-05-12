@@ -133,11 +133,43 @@ def slugify(text: str, max_len: int = 60) -> str:
     return text[:max_len].strip("-") or "writeup"
 
 
+_MEDIUM_HOSTS = ("medium.com", "infosecwriteups.com", "betterprogramming.pub",
+                 "blog.devgenius.io", "blog.stackademic.com", "javascript.plainenglish.io")
+
+
+def _looks_like_medium(url: str) -> bool:
+    """True if the URL is a Medium-hosted writeup. Medium articles are very
+    often paywalled (Member-only stories) — fetching them directly returns
+    only a preview, even when Cloudflare doesn't block us outright."""
+    host = urlparse(url).hostname or ""
+    return any(host == h or host.endswith("." + h) for h in _MEDIUM_HOSTS)
+
+
 def fetch_html(url: str) -> str:
-    """Fetch the page HTML. Falls back to r.jina.ai (a public fetch proxy
-    that handles bot detection on its end) when the direct request is
-    blocked — common for Medium, Cloudflare-fronted blogs, and when the
-    client IP is on a residential / VPN / Kali range."""
+    """Fetch the page HTML.
+
+    Strategy:
+      1. If the URL looks like a Medium post → try freedium-mirror.cfd
+         first. It bypasses both the Cloudflare challenge AND the Medium
+         paywall ("Member-only story"), so we get the full article body.
+      2. Otherwise try a direct fetch with browser-like headers.
+      3. If the direct fetch is bot-blocked (401/403/429/451/503), fall
+         back to r.jina.ai (a public fetch proxy).
+    """
+    # 1. Medium → freedium-mirror auto-prefix
+    if _looks_like_medium(url):
+        try:
+            mirror_url = f"https://freedium-mirror.cfd/{url}"
+            print(f"      Detected Medium URL — fetching via freedium-mirror...")
+            r = requests.get(mirror_url, headers=UA, timeout=30, allow_redirects=True)
+            if r.ok and len(r.text) > 5000:
+                r.encoding = r.apparent_encoding or "utf-8"
+                return r.text
+            print(f"      freedium-mirror returned {r.status_code} / {len(r.text)} bytes — falling through to direct fetch")
+        except requests.RequestException as e:
+            print(f"      freedium-mirror request failed ({e}) — falling through to direct fetch")
+
+    # 2. Direct fetch
     try:
         resp = requests.get(url, headers=UA, timeout=30, allow_redirects=True)
         resp.raise_for_status()
@@ -146,10 +178,7 @@ def fetch_html(url: str) -> str:
     except requests.HTTPError as e:
         status = e.response.status_code if e.response is not None else 0
         if status in (401, 403, 429, 451, 503):
-            # Fetch through r.jina.ai. It returns the page rendered as
-            # markdown; we wrap it in a minimal HTML envelope so the
-            # downstream trafilatura/extract pipeline can still work
-            # (it'll mostly pass-through, which is fine).
+            # 3. r.jina.ai fallback
             print(f"      Direct fetch returned {status}; falling back to r.jina.ai...")
             r = requests.get(
                 f"https://r.jina.ai/{url}",
@@ -160,7 +189,6 @@ def fetch_html(url: str) -> str:
             r.encoding = r.apparent_encoding or "utf-8"
             body = r.text
             if "<html" not in body.lower():
-                # jina returned plain markdown — wrap so the extractor accepts it
                 body = f"<html><body><article>{body}</article></body></html>"
             return body
         raise
@@ -383,7 +411,7 @@ ANALYSIS_PROMPT = """انت محلل أمن سيبراني هجومي خبير. 
 
   "core_idea_explained": "شرح تفصيلي بالعربي المصري للفكرة الذكية اللي خلت الباج ده يشتغل. ده أهم قسم في التحليل. اشرح: ايه الـ insight اللي اكتشفه الباحث؟ ليه ده مش obvious؟ ايه اللي بيخليه creative؟ خليه 3-5 فقرات تشرح المنطق بعمق بحيث اللي يقرا الشرح ده بس يبقى فاهم الفكرة كاملة من غير ما يقرا الـ writeup الأصلي. استخدم [Screenshot N] لو محتاج تشير لصورة.",
 
-  "attack_scenario": "شرح بالعربي المصري للسيناريو الكامل للهجوم بشكل سردي مش bullet points. اشرح ايه اللي بيحصل في كل مرحلة وليه. اذكر الـ requests والـ responses لما تكون مهمة. اشرح من منظور المهاجم. 3-6 فقرات. استخدم [Screenshot N] في السياق المناسب.",
+  "attack_scenario": "شرح بالعربي المصري للسيناريو الكامل للهجوم بشكل سردي مش bullet points. **مهم جداً: اتبع نفس الـ sequence الأصلي للكاتب من أول خطوة لآخر خطوة، ما تـ skipش أي مرحلة، وما تـ summarize-ش**. لو الكاتب ذكر 8 خطوات، خلي الشرح يغطي الـ 8 خطوات بنفس الترتيب. اذكر كل الـ requests والـ responses والـ payloads والـ observations اللي ذكرها. اشرح من منظور المهاجم. كل خطوة فقرة لوحدها. استخدم [Screenshot N] بالضبط في السياق اللي ذكره الكاتب فيه الصورة.",
 
   "attack_steps_concise": [
     "خطوة قصيرة عملية 1",
