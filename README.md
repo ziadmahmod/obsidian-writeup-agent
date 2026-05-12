@@ -202,6 +202,16 @@ You can edit it by hand if you prefer.
 - The site likely requires JavaScript to render content — not supported.
 - Save the page from the browser's Reader View as HTML, then host it locally and re-analyze.
 
+### `ImportError: lxml.html.clean module is now a separate project`
+This happens with `lxml >= 5.2` (which dropped `lxml.html.clean`) plus `trafilatura`'s `justext` dependency that still imports it. The pinned `requirements.txt` already accounts for this — make sure your install is up to date:
+```bash
+pip install -r requirements.txt --upgrade
+```
+If you still see it, install the split module directly:
+```bash
+pip install lxml_html_clean
+```
+
 ### Server crashes on banner print (Windows)
 - `start.bat` sets `PYTHONIOENCODING=utf-8` and `PYTHONUTF8=1` automatically. Use it instead of running `python app.py` directly.
 
